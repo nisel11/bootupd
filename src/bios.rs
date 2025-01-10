@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::io::prelude::*;
 use std::path::Path;
 use std::process::Command;
+use std::fs;
 
 use crate::blockdev;
 use crate::bootupd::RootContext;
@@ -14,8 +15,8 @@ use crate::grubconfigs;
 use crate::model::*;
 use crate::packagesystem;
 
-// grub2-install file path
-pub(crate) const GRUB_BIN: &str = "usr/sbin/grub2-install";
+// grub-install file path
+pub(crate) const GRUB_BIN: &str = "usr/sbin/grub-install";
 
 #[cfg(target_arch = "powerpc64")]
 fn target_device(device: &str) -> Result<Cow<str>> {
@@ -47,7 +48,7 @@ pub(crate) struct Bios {}
 impl Bios {
     // Return `true` if grub2-modules installed
     fn check_grub_modules(&self) -> Result<bool> {
-        let usr_path = Path::new("/usr/lib/grub");
+        let usr_path = Path::new("/usr/lib64/grub");
         #[cfg(target_arch = "x86_64")]
         {
             usr_path.join("i386-pc").try_exists().map_err(Into::into)
@@ -61,10 +62,10 @@ impl Bios {
         }
     }
 
-    // Run grub2-install
+    // Run grub-install
     fn run_grub_install(&self, dest_root: &str, device: &str) -> Result<()> {
         if !self.check_grub_modules()? {
-            bail!("Failed to find grub2-modules");
+            bail!("Failed to find grub modules");
         }
         let grub_install = Path::new("/").join(GRUB_BIN);
         if !grub_install.exists() {
@@ -96,8 +97,66 @@ impl Bios {
             std::io::stderr().write_all(&cmdout.stderr)?;
             bail!("Failed to run {:?}", cmd);
         }
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let source = Path::new("/usr/lib64/grub/x86_64-efi");
+            let destination = boot_dir.join("grub").join("x86_64-efi");
+
+            // Check if source directory exists
+            if !source.exists() {
+                bail!("Source directory {:?} not found", source);
+            }
+
+            // Perform copying
+            copy_dir_all(&source, &destination)?;
+            log::info!("Directory {:?} successfully copied to {:?}", source, destination);
+        }
+
+        #[cfg(target_arch = "powerpc64")]
+        {
+            let source = Path::new("/usr/lib64/grub/powerpc-ieee1275");
+            let destination = boot_dir.join("powerpc-ieee1275");
+
+            // Check if source directory exists
+            if !source.exists() {
+                bail!("Source directory {:?} not found", source);
+            }
+
+            // Perform copying
+            copy_dir_all(&source, &destination)?;
+            log::info!("Directory {:?} successfully copied to {:?}", source, destination);
+        }
+
         Ok(())
     }
+}
+
+/// Recursive directory copy function
+fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
+    if !src.exists() {
+        bail!("Directory {:?} not found", src);
+    }
+
+    fs::create_dir_all(dest)?;
+
+    for entry_result in fs::read_dir(src)? {
+        let entry = entry_result?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+
+        if file_type.is_dir() {
+            copy_dir_all(&src_path, &dest_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&src_path, &dest_path)?;
+        } else {
+            // Handle other file types (symlinks, etc.) if necessary
+            log::warn!("Warning: Unsupported file type: {:?}", src_path);
+        }
+    }
+
+    Ok(())
 }
 
 impl Component for Bios {
